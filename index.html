@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+    <title>Heightfield - Physijs</title>
+
+    <style>
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+        }
+
+        #viewport {
+            cursor: url('assets/cursor.png'), pointer;
+            position: relative;
+        }
+
+        #trace {
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            background-image: url("assets/trace.png");
+            display: none;
+        }
+    </style>
+
+    <script type="text/javascript" src="configuration.js"></script>
+
+    <script type="text/javascript" src="js/three101.js"></script>
+    <script type="text/javascript" src="js/inflate.min.js"></script>
+    <script type="text/javascript" src="js/OBJLoader.js"></script>
+    <script type="text/javascript" src="js/tween.js"></script>
+    <script type="text/javascript" src="js/physi.js"></script>
+
+    <script src="js/SAOShader.js"></script>
+    <script src="js/DepthLimitedBlurShader.js"></script>
+    <script src="js/UnpackDepthRGBAShader.js"></script>
+    <script src="js/EffectComposer.js"></script>
+    <script src="js/RenderPass.js"></script>
+    <script src="js/ShaderPass.js"></script>
+    <script src="js/SAOPass.js"></script>
+    <script src="js/CopyShader.js"></script>
+    <script src="js/SimplexNoise.js"></script>
+    <script src='js/dat.gui.min.js'></script>
+
+</head>
+
+<body>
+<div id="viewport">
+    <div id="trace"></div>
+</div>
+
+<script type="text/javascript">
+
+    'use strict';
+
+    Physijs.scripts.worker = 'js/physijs_worker.js';
+    Physijs.scripts.ammo = 'ammo.js';
+
+    var initScene, render, renderer, scene, light, camera, ssaoPass,
+        effectComposer;
+
+    var shapes_array = [];
+    var mouse_collision;
+    var mouse_pos;
+
+    var animated = {
+        rotateSpeed: 7,
+        entrance: true,
+    };
+
+    var trace = document.getElementById('trace');
+
+    var arrayRandom = function (arr) {
+        return arr[Math.floor(Math.random() * arr.length)];
+    };
+
+    var loadParticles = function () {
+        var loader = new THREE.OBJLoader();
+
+        for (var i in config.particles) {
+            (function () {
+                var pconf = config.particles[i];
+
+                loader.load(pconf.src, function (object) {
+                    var material = new THREE.MeshLambertMaterial();
+                    material.color = new THREE.Color(pconf.color);
+
+                    object.traverse(function (child) {
+                        if (child.isMesh) {
+
+                            child.geometry.scale(pconf.scale, pconf.scale, pconf.scale);
+
+                            for (var i = 0; i < pconf.count; i++) {
+
+                                var phys_object;
+
+                                switch (pconf.bounding) {
+                                    case "box":
+                                        phys_object = new Physijs.BoxMesh(
+                                            child.geometry,
+                                            material,
+                                            undefined,
+                                            {restitution: Math.random() * 1.5}
+                                        );
+                                        break;
+                                    case "capsule":
+                                        phys_object = new Physijs.CapsuleMesh(
+                                            child.geometry,
+                                            material,
+                                            undefined,
+                                            {restitution: Math.random() * 1.5}
+                                        );
+                                        break;
+                                    case "cone":
+                                        phys_object = new Physijs.ConeMesh(
+                                            child.geometry,
+                                            material,
+                                            undefined,
+                                            {restitution: Math.random() * 1.5}
+                                        );
+                                        break;
+                                    case "sphere":
+                                        phys_object = new Physijs.SphereMesh(
+                                            child.geometry,
+                                            material,
+                                            undefined,
+                                            {restitution: Math.random() * 1.5}
+                                        );
+                                        break;
+                                    default:
+                                        phys_object = new Physijs.CapsuleMesh(
+                                            child.geometry,
+                                            material,
+                                            undefined,
+                                            {restitution: Math.random() * 1.5}
+                                        );
+                                        break;
+                                }
+
+                                phys_object.position.set(
+                                    Math.random() * 20 - 10,
+                                    Math.random() * 30 - 30 - 10,
+                                    Math.random() * 20 - 10 - 20
+                                );
+
+                                phys_object.rotation.set(
+                                    Math.random() * Math.PI,
+                                    Math.random() * Math.PI,
+                                    Math.random() * Math.PI
+                                );
+
+                                shapes_array.push(phys_object);
+
+                                scene.add(phys_object);
+
+                                updateShapeVelocity(phys_object);
+                            }
+                        }
+                    });
+                }, undefined, console.error);
+            })();
+        }
+    };
+
+    initScene = function () {
+        TWEEN.start();
+
+        renderer = new THREE.WebGLRenderer({antialias: true, alpha: true});
+        if (!renderer.extensions.get('WEBGL_depth_texture')) {
+            alert('Missing WEBGL_depth_texture extension');
+            return;
+        }
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x000000, 0);
+        renderer.shadowMap.enabled = false;
+        renderer.shadowMap.soft = false;
+        document.getElementById('viewport').appendChild(renderer.domElement);
+
+        scene = new Physijs.Scene({fixedTimeStep: 1 / 120});
+        scene.setGravity(new THREE.Vector3(0, 0, 0));
+        scene.addEventListener(
+            'update',
+            function () {
+                for (var i in shapes_array) {
+                    updateShapeVelocity(shapes_array[i]);
+                }
+                if (mouse_collision) {
+                    if (mouse_pos) {
+                        mouse_collision.position.set(mouse_pos.x, mouse_pos.y, -2);
+                        mouse_collision.__dirtyPosition = true;
+                    }
+                    mouse_collision.setLinearVelocity(new THREE.Vector3(0, 0, 0));
+                }
+
+                scene.simulate(undefined, 1);
+            }
+        );
+
+        camera = new THREE.PerspectiveCamera(
+            35,
+            window.innerWidth / window.innerHeight,
+            1,
+            1000
+        );
+        camera.position.set(0, 0, -30);
+        camera.lookAt(scene.position);
+        scene.add(camera);
+
+        var light_positions = [
+            {
+                x: config.lights.light1.position.x,
+                y: config.lights.light1.position.y,
+                z: config.lights.light1.position.z,
+                intensity: config.lights.light1.intensity,
+                color: config.lights.light1.color
+            },
+            {
+                x: config.lights.light2.position.x,
+                y: config.lights.light2.position.y,
+                z: config.lights.light2.position.z,
+                intensity: config.lights.light2.intensity,
+                color: config.lights.light2.color
+            },
+            {intensity: config.lights.ambient.intensity, color: config.lights.ambient.color}
+        ];
+
+        // // Init gui
+        // var gui = new dat.GUI();
+        //
+        // // Light
+        var light1 = new THREE.DirectionalLight(0x909090);
+        light1.position.set(light_positions[0].x, light_positions[0].y, light_positions[0].z);
+        light1.target.position.copy(scene.position);
+        light1.color = new THREE.Color(light_positions[0].color);
+        //
+        // gui.add({
+        //     '---------': "LIGHT_1",
+        // }, '---------');
+        //
+        // gui.add(light_positions[0], 'x', -70, 70).onChange(function (val) {
+        //     light1.position.set(light_positions[0].x, light_positions[0].y, light_positions[0].z);
+        // });
+        // gui.add(light_positions[0], 'y', -70, 70).onChange(function (val) {
+        //     light1.position.set(light_positions[0].x, light_positions[0].y, light_positions[0].z);
+        // });
+        // gui.add(light_positions[0], 'z', -70, 70).onChange(function (val) {
+        //     light1.position.set(light_positions[0].x, light_positions[0].y, light_positions[0].z);
+        // });
+        // gui.add(light_positions[0], 'intensity', 0.0, 1.0).onChange(function (val) {
+        //     light1.intensity = val;
+        // });
+        // gui.addColor(light_positions[0], 'color').onChange(function (val) {
+        //     light1.color = new THREE.Color(val);
+        // });
+
+        scene.add(light1);
+
+        light = new THREE.DirectionalLight(0x909090);
+        light.position.set(light_positions[1].x, light_positions[1].y, light_positions[1].z);
+        light.target.position.copy(scene.position);
+        light.color = new THREE.Color(light_positions[1].color);
+
+        // gui.add({
+        //     '---------': "LIGHT_2",
+        // }, '---------');
+        //
+        // gui.add(light_positions[1], 'x', -70, 70).onChange(function (val) {
+        //     light.position.set(light_positions[1].x, light_positions[1].y, light_positions[1].z);
+        // });
+        // gui.add(light_positions[1], 'y', -70, 70).onChange(function (val) {
+        //     light.position.set(light_positions[1].x, light_positions[1].y, light_positions[1].z);
+        // });
+        // gui.add(light_positions[1], 'z', -70, 70).onChange(function (val) {
+        //     light.position.set(light_positions[1].x, light_positions[1].y, light_positions[1].z);
+        // });
+        // gui.add(light_positions[1], 'intensity', 0.0, 1.0).onChange(function (val) {
+        //     light.intensity = val;
+        // });
+        // gui.addColor(light_positions[1], 'color').onChange(function (val) {
+        //     light.color = new THREE.Color(val);
+        // });
+
+        scene.add(light);
+
+        var alight = new THREE.AmbientLight(0xaaaaaa);
+        alight.color = new THREE.Color(light_positions[2].color);
+
+        // gui.add({
+        //     '---------': "AMBIENT_LIGHT",
+        // }, '---------');
+        //
+        // gui.add(light_positions[1], 'intensity', 0.0, 1.0).onChange(function (val) {
+        //     alight.intensity = val;
+        // });
+        // gui.addColor(light_positions[2], 'color').onChange(function (val) {
+        //     alight.color = new THREE.Color(val);
+        // });
+
+        scene.add(alight);
+
+        initSsao();
+
+        requestAnimationFrame(render);
+        scene.simulate();
+
+        loadParticles();
+
+        new TWEEN.Tween(animated).easing(TWEEN.Easing.Quadratic.EaseIn).to({rotateSpeed: 0}, 2700).onComplete(function () {
+            animated.entrance = false;
+        }).start();
+
+        document.getElementById('viewport').addEventListener("mousemove", function (event) {
+
+            if (mouse_pos) {
+                trace.style.left = String(event.clientX - 23) + 'px';
+                trace.style.top = String(event.clientY - 23) + 'px';
+                trace.style.display = 'block';
+            }
+
+            if (!mouse_collision && scene) {
+                spawnMouseCollisionSphere();
+            }
+
+            setTimeout(function () {
+                if (mouse_collision) {
+                    mouse_pos = getMouseWorldCoords(event);
+                    mouse_collision.position.set(mouse_pos.x, mouse_pos.y, -2);
+                    mouse_collision.__dirtyPosition = true;
+                    mouse_collision.setLinearVelocity(new THREE.Vector3(0, 0, 0));
+                }
+            }, 200);
+        });
+    };
+
+    var initSsao = function () {
+        effectComposer = new THREE.EffectComposer(renderer);
+        var renderPass = new THREE.RenderPass(scene, camera);
+        effectComposer.addPass(renderPass);
+        ssaoPass = new THREE.SAOPass(scene, camera, false, true);
+        ssaoPass.renderToScreen = true;
+        effectComposer.addPass(ssaoPass);
+
+        ssaoPass.params.saoBias = 0.43;
+        ssaoPass.params.saoIntensity = 0.005;
+        ssaoPass.params.saoScale = 8.2;
+        ssaoPass.params.saoKernelRadius = 10;
+        ssaoPass.params.saoMinResolution = 0;
+        ssaoPass.params.saoBlur = true;
+        ssaoPass.params.saoBlurRadius = 10;
+        ssaoPass.params.saoBlurStdDev = 5;
+        ssaoPass.params.saoBlurDepthCutoff = 0.001;
+
+        // Init gui
+        /*var gui = new dat.GUI();
+        gui.add( light_positions, 'output', {
+            'Beauty': THREE.SAOPass.OUTPUT.Beauty,
+        } ).onChange( function ( value ) {
+
+            ssaoPass.params.output = parseInt( value );
+
+        } );*/
+        /*gui.add( ssaoPass.params, 'output', {
+            'Beauty': THREE.SAOPass.OUTPUT.Beauty,
+            'Beauty+SAO': THREE.SAOPass.OUTPUT.Default,
+            'SAO': THREE.SAOPass.OUTPUT.SAO,
+            'Depth': THREE.SAOPass.OUTPUT.Depth,
+            'Normal': THREE.SAOPass.OUTPUT.Normal
+        } ).onChange( function ( value ) {
+
+            ssaoPass.params.output = parseInt( value );
+
+        } );
+        gui.add( ssaoPass.params, 'saoBias', - 1, 1 );
+        gui.add( ssaoPass.params, 'saoIntensity', 0, 1 );
+        gui.add( ssaoPass.params, 'saoScale', 0, 10 );
+        gui.add( ssaoPass.params, 'saoKernelRadius', 1, 100 );
+        gui.add( ssaoPass.params, 'saoMinResolution', 0, 1 );
+        gui.add( ssaoPass.params, 'saoBlur' );
+        gui.add( ssaoPass.params, 'saoBlurRadius', 0, 200 );
+        gui.add( ssaoPass.params, 'saoBlurStdDev', 0.5, 150 );
+        gui.add( ssaoPass.params, 'saoBlurDepthCutoff', 0.0, 0.1 );*/
+
+    };
+
+    render = function () {
+        requestAnimationFrame(render);
+        renderer.render(scene, camera);
+
+        effectComposer.render();
+    };
+
+    var axisX = new THREE.Vector3(1, 0, 0);
+
+    var updateShapeVelocity = function (shape) {
+        // center gravity
+        var diff = shape.position.clone().sub(new THREE.Vector3(THREE.Math.clamp(shape.position.x, -5, 5), 0, 0));
+
+        var bvel = diff.normalize().negate();
+
+        if (animated.entrance) {
+            var rotateVel = bvel.clone().cross(axisX).normalize().multiplyScalar(animated.rotateSpeed);
+        }
+
+        // Gravity force
+        var grav = 5.82;
+        bvel.multiplyScalar(grav);
+
+        // Average it out
+        bvel.add(shape.getLinearVelocity()).multiplyScalar(0.9);
+        shape.setLinearVelocity(animated.entrance ? bvel.add(rotateVel) : bvel);
+    };
+
+    var spawnMouseCollisionSphere = function () {
+        var shape, material = new THREE.MeshLambertMaterial(/*{opacity: 0, transparent: true}*/);
+
+        shape = new Physijs.SphereMesh(
+            new THREE.SphereGeometry(5, 32, 32),
+            material,
+            undefined,
+            {restitution: Math.random() * 1.5}
+        );
+
+        //shape.material.color.setRGB(Math.random() * 100 / 100, Math.random() * 100 / 100, Math.random() * 100 / 100);
+
+        shape.position.set(
+            0,
+            0,
+            100
+        );
+
+        shape.rotation.set(
+            0,
+            0,
+            0
+        );
+
+        shape.setLinearVelocity(new THREE.Vector3(0, 0, 0));
+        shape.visible = false;
+
+        mouse_collision = shape;
+        scene.add(shape);
+    };
+
+    var getMouseWorldCoords = function (event) {
+        var vec = new THREE.Vector3(); // create once and reuse
+        var pos = new THREE.Vector3(); // create once and reuse
+
+        vec.set(
+            (event.clientX / window.innerWidth) * 2 - 1,
+            -(event.clientY / window.innerHeight) * 2 + 1,
+            0.5);
+
+        vec.unproject(camera);
+
+        vec.sub(camera.position).normalize();
+
+        var distance = -camera.position.z / vec.z;
+
+        pos.copy(camera.position).add(vec.multiplyScalar(distance));
+
+        return pos;
+    };
+
+    window.onload = initScene;
+
+</script>
+
+</body>
+
+</html>
